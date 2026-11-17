@@ -42,7 +42,7 @@ Class=IEXPRESS
 SEDVersion=3
 [Options]
 PackagePurpose=InstallApp
-ShowInstallProgramWindow=1
+ShowInstallProgramWindow=0
 HideExtractAnimation=1
 UseLongFileName=1
 InsideCompressed=0
@@ -60,9 +60,9 @@ AdminQuietInstCmd=%AdminQuietInstCmd%
 UserQuietInstCmd=%UserQuietInstCmd%
 SourceFiles=SourceFiles
 [Strings]
-InstallPrompt=Install NewsX for this user?
+InstallPrompt=
 DisplayLicense=
-FinishMessage=NewsX installation completed.
+FinishMessage=
 TargetName="$installer"
 FriendlyName=NewsX Setup
 AppLaunched=cmd.exe /c setup.cmd
