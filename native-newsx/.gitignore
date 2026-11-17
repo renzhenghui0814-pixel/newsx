@@ -1,0 +1,7 @@
+.tools/
+qt/
+build*/
+C++_API_v1.0.9_20250825/
+*.log
+*.sed
+*.user
