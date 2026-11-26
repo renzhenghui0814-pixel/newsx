@@ -1,10 +1,14 @@
 #include "news_service.h"
+#include "weibo_diagnostics.h"
+#include "weibo_session.h"
+#include "desktop_weibo.h"
 
 #include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QNetworkCookieJar>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextDocument>
@@ -382,7 +386,12 @@ QJsonArray parse_comments(const QByteArray& bytes) {
 
 } // namespace
 
-NewsService::NewsService(QObject* parent) : QObject(parent) {}
+NewsService::NewsService(QObject* parent, bool restore_session) : QObject(parent), session_(new WeiboSession(this, restore_session)) {
+    connect(session_, &WeiboSession::changed, this, [this] {
+        visitor_cookie_.clear();
+        network_.setCookieJar(new QNetworkCookieJar(&network_));
+    });
+}
 NewsService::~NewsService() {
     for (auto* reply : network_.findChildren<QNetworkReply*>()) {
         disconnect(reply, nullptr, this, nullptr);
@@ -394,12 +403,28 @@ void NewsService::get(const QUrl& url, const QString& referer, const QString& ag
                       qint64 max_bytes, ReplyHandler handler, const QByteArray& cookie) {
     QNetworkRequest request(url);
     request.setTransferTimeout(12000);
+    // All Weibo credentials are selected explicitly; late Set-Cookie responses
+    // from a previous account must not contaminate a new anonymous session.
+    request.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
+    request.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
     request.setRawHeader("User-Agent", agent.toUtf8());
     if (!referer.isEmpty()) request.setRawHeader("Referer", referer.toUtf8());
-    if (!cookie.isEmpty()) {
-        request.setRawHeader("Cookie", cookie);
-        request.setRawHeader("MWeibo-Pwa", "1");
-        request.setRawHeader("X-Requested-With", "XMLHttpRequest");
+    const auto account_cookie = session_->cookie_header(url);
+    if (!account_cookie.isEmpty() && !session_->user_agent().isEmpty())
+        request.setRawHeader("User-Agent", session_->user_agent().toUtf8());
+    const auto active_cookie = account_cookie.isEmpty() ? cookie : account_cookie;
+    if (!account_cookie.isEmpty())
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+    if (!active_cookie.isEmpty()) {
+        request.setRawHeader("Cookie", active_cookie);
+        if (url.host() == QStringLiteral("m.weibo.cn")) {
+            request.setRawHeader("MWeibo-Pwa", "1");
+            request.setRawHeader("X-Requested-With", "XMLHttpRequest");
+        }
+    }
+    if (url.host() == QStringLiteral("s.weibo.com")) {
+        request.setRawHeader("Accept", "text/html,application/xhtml+xml");
+        request.setRawHeader("Accept-Language", "zh-CN,zh;q=0.9");
     }
     auto* reply = network_.get(request);
     connect(reply, &QNetworkReply::finished, this, [reply, max_bytes, handler = std::move(handler)]() mutable {
@@ -464,6 +489,8 @@ void NewsService::refresh_headlines() {
 }
 
 void NewsService::ensure_visitor(std::function<void(QByteArray)> ready) {
+    const auto account = session_->cookie_header(QUrl(QStringLiteral("https://m.weibo.cn/")));
+    if (!account.isEmpty()) { ready(account); return; }
     if (!visitor_cookie_.isEmpty()) { ready(visitor_cookie_); return; }
     get(QUrl(QStringLiteral("https://visitor.passport.weibo.cn/visitor/genvisitor2?cb=visitor_callback&from=weibo.cn")),
         {}, QString::fromLatin1(kMobileAgent), 100'000,
@@ -494,7 +521,11 @@ void NewsService::load_more_weibo_posts(const QString& keyword, const QString& s
 }
 
 void NewsService::search_weibo(const QString& keyword, const QString& search_url,
-                               int token, int page, int attempt) {
+                               int token, int page, int attempt, bool realtime) {
+    if (session_->logged_in() && !realtime && QUrl(search_url).host() == QStringLiteral("s.weibo.com")) {
+        search_desktop_weibo(keyword, search_url, token, page);
+        return;
+    }
     QUrl url(QStringLiteral("https://m.weibo.cn/api/container/getIndex"));
     QUrlQuery query;
     const QUrl source(search_url);
@@ -502,38 +533,99 @@ void NewsService::search_weibo(const QString& keyword, const QString& search_url
     const QString topic = source.host() == QStringLiteral("s.weibo.com")
         ? source_query.queryItemValue(QStringLiteral("q")) : QString{};
     const QString search_term = topic.isEmpty() ? QStringLiteral("#") + keyword + QStringLiteral("#") : topic;
-    query.addQueryItem(QStringLiteral("containerid"), QStringLiteral("100103type=1&q=") + search_term);
+    query.addQueryItem(QStringLiteral("containerid"),
+        (realtime ? QStringLiteral("100103type=61&q=") : QStringLiteral("100103type=1&q=")) + search_term);
     query.addQueryItem(QStringLiteral("page_type"), QStringLiteral("searchall"));
     query.addQueryItem(QStringLiteral("t"), QStringLiteral("31"));
     if (source_query.hasQueryItem(QStringLiteral("band_rank")))
         query.addQueryItem(QStringLiteral("band_rank"), source_query.queryItemValue(QStringLiteral("band_rank")));
     if (source_query.hasQueryItem(QStringLiteral("Refer")))
         query.addQueryItem(QStringLiteral("Refer"), source_query.queryItemValue(QStringLiteral("Refer")));
-    query.addQueryItem(QStringLiteral("page"), QString::number(page));
+    query.addQueryItem(QStringLiteral("page"), QString::number(realtime ? 1 : page));
     url.setQuery(query);
+    log_weibo_page(QStringLiteral("request"), {
+        {QStringLiteral("token"), token}, {QStringLiteral("page"), page},
+        {QStringLiteral("attempt"), attempt}, {QStringLiteral("realtime_supplement"), realtime},
+        {QStringLiteral("has_visitor_cookie"), !visitor_cookie_.isEmpty()}});
     get(url, QStringLiteral("https://m.weibo.cn/"), QString::fromLatin1(kMobileAgent), 2'000'000,
-        [this, keyword, search_url, token, page, attempt](const QByteArray& bytes, const QString& error) {
+        [this, keyword, search_url, token, page, attempt, realtime](const QByteArray& bytes, const QString& error) {
             const auto root = QJsonDocument::fromJson(bytes).object();
-            if (!error.isEmpty() || root.value(QStringLiteral("ok")).toInt() != 1) {
-                if (page > 1 && error.isEmpty() && root.value(QStringLiteral("ok")).toInt() == -100) {
-                    emit posts_ready(token, page, {}, true);
-                    return;
+            const auto data = root.value(QStringLiteral("data")).toObject();
+            const auto cards = data.value(QStringLiteral("cards")).toArray();
+            const auto parsed = parse_posts(bytes);
+            const auto count_blogs = [](auto&& self, const QJsonArray& list) -> int {
+                int count = 0;
+                for (const auto& value : list) {
+                    const auto card = value.toObject();
+                    if (card.value(QStringLiteral("mblog")).toObject().contains(QStringLiteral("id"))) ++count;
+                    count += self(self, card.value(QStringLiteral("card_group")).toArray());
                 }
+                return count;
+            };
+            QJsonObject pagination;
+            for (const auto& key : {QStringLiteral("page"), QStringLiteral("since_id"),
+                                   QStringLiteral("max_id"), QStringLiteral("total"),
+                                   QStringLiteral("has_more")}) {
+                if (data.contains(key)) pagination.insert(key, data.value(key));
+                const auto info = data.value(QStringLiteral("cardlistInfo")).toObject();
+                if (info.contains(key)) pagination.insert(QStringLiteral("cardlistInfo.") + key, info.value(key));
+            }
+            QJsonArray ids;
+            for (const auto& post : parsed) ids.append(post.toObject().value(QStringLiteral("id")));
+            log_weibo_page(QStringLiteral("response"), {
+                {QStringLiteral("token"), token}, {QStringLiteral("page"), page},
+                {QStringLiteral("attempt"), attempt}, {QStringLiteral("realtime_supplement"), realtime},
+                {QStringLiteral("ok"), root.value(QStringLiteral("ok"))},
+                {QStringLiteral("msg"), root.value(QStringLiteral("msg"))},
+                {QStringLiteral("login_required"), root.value(QStringLiteral("ok")).toInt() == -100
+                    && QUrl(root.value(QStringLiteral("url")).toString()).host() == QStringLiteral("passport.weibo.com")},
+                {QStringLiteral("network_error"), error}, {QStringLiteral("bytes"), bytes.size()},
+                {QStringLiteral("cards"), cards.size()}, {QStringLiteral("nested_blog_count"), count_blogs(count_blogs, cards)},
+                {QStringLiteral("parsed_count"), parsed.size()}, {QStringLiteral("ids"), ids},
+                {QStringLiteral("pagination"), pagination}});
+
+            const bool login_required = error.isEmpty()
+                && root.value(QStringLiteral("ok")).toInt() == -100
+                && QUrl(root.value(QStringLiteral("url")).toString()).host() == QStringLiteral("passport.weibo.com");
+            const QString completion_status = QStringLiteral("已补充同话题实时结果 · 更多内容需在微博登录查看");
+            if (login_required && session_->logged_in()) {
+                session_->logout(QStringLiteral("微博登录已失效 · 已切换匿名会话"));
+                return; // Session change restarts the visible topic with a fresh request token.
+            }
+            if (login_required && !realtime && page > 1) {
+                // Anonymous search exposes only the first page. Supplement with
+                // the public realtime first page; this is not comprehensive page 2.
+                search_weibo(keyword, search_url, token, page, 0, true);
+                return;
+            }
+            if (login_required) {
+                emit posts_ready(token, page, {}, true, false,
+                    QStringLiteral("更多内容需在微博登录查看"));
+                return;
+            }
+            if (!error.isEmpty() || root.value(QStringLiteral("ok")).toInt() != 1) {
                 if (attempt == 0) {
                     visitor_cookie_.clear();
-                    ensure_visitor([this, keyword, search_url, token, page](const QByteArray& cookie) {
-                        if (!cookie.isEmpty()) search_weibo(keyword, search_url, token, page, 1);
+                    ensure_visitor([this, keyword, search_url, token, page, realtime](const QByteArray& cookie) {
+                        if (!cookie.isEmpty()) search_weibo(keyword, search_url, token, page, 1, realtime);
                         else emit posts_failed(token, page, QStringLiteral("微博搜索不可用"));
                     });
                 } else emit posts_failed(token, page, error.isEmpty() ? QStringLiteral("微博搜索不可用") : error);
                 return;
             }
-            auto posts = parse_posts(bytes);
+            auto posts = parsed;
             if (posts.isEmpty() && page == 1) {
                 emit posts_failed(token, page, QStringLiteral("微博综合搜索没有返回微博"));
                 return;
             }
-            emit posts_ready(token, page, posts, false);
+            if (realtime) {
+                for (int i = 0; i < posts.size(); ++i) {
+                    auto row = posts[i].toObject();
+                    row.insert(QStringLiteral("search_source"), QStringLiteral("实时补充"));
+                    posts[i] = row;
+                }
+            }
+            emit posts_ready(token, page, posts, false, !realtime);
             auto pending = std::make_shared<int>(0);
             auto extended_posts = std::make_shared<QJsonArray>(posts);
             for (int i = 0; i < posts.size(); ++i) {
@@ -545,7 +637,7 @@ void NewsService::search_weibo(const QString& keyword, const QString& search_url
                 query.addQueryItem(QStringLiteral("id"), post.value(QStringLiteral("url")).toString().section('/', -1));
                 url.setQuery(query);
                 get(url, QStringLiteral("https://m.weibo.cn/"), QString::fromLatin1(kMobileAgent),
-                    2'000'000, [this, token, page, extended_posts, pending, i](const QByteArray& bytes, const QString& error) {
+                    2'000'000, [this, token, page, extended_posts, pending, i, realtime, completion_status](const QByteArray& bytes, const QString& error) {
                         if (error.isEmpty()) {
                             const auto body = QJsonDocument::fromJson(bytes).object().value(QStringLiteral("data"))
                                                   .toObject().value(QStringLiteral("longTextContent")).toString();
@@ -557,11 +649,56 @@ void NewsService::search_weibo(const QString& keyword, const QString& search_url
                                 (*extended_posts)[i] = row;
                             }
                         }
-                        if (--*pending == 0) emit posts_ready(token, page, *extended_posts, true);
+                        if (--*pending == 0) emit posts_ready(token, page, *extended_posts, true, !realtime,
+                            realtime ? completion_status : QString{});
                     }, visitor_cookie_);
             }
-            if (*pending == 0) emit posts_ready(token, page, *extended_posts, true);
+            if (*pending == 0) emit posts_ready(token, page, *extended_posts, true, !realtime,
+                realtime ? completion_status : QString{});
         }, visitor_cookie_);
+}
+
+void NewsService::search_desktop_weibo(const QString& keyword, const QString& search_url, int token, int page) {
+    QUrl url(QStringLiteral("https://s.weibo.com/weibo"));
+    const QUrl source(search_url);
+    QUrlQuery query;
+    if (source.host() == QStringLiteral("s.weibo.com") && source.path() == QStringLiteral("/weibo"))
+        query = QUrlQuery(source);
+    if (!query.hasQueryItem(QStringLiteral("q")))
+        query.addQueryItem(QStringLiteral("q"), QStringLiteral("#") + keyword + QStringLiteral("#"));
+    if (!query.hasQueryItem(QStringLiteral("t"))) query.addQueryItem(QStringLiteral("t"), QStringLiteral("31"));
+    if (!query.hasQueryItem(QStringLiteral("Refer"))) query.addQueryItem(QStringLiteral("Refer"), QStringLiteral("top"));
+    query.removeAllQueryItems(QStringLiteral("page"));
+    if (page > 1) query.addQueryItem(QStringLiteral("page"), QString::number(page));
+    url.setQuery(query);
+    if (session_->cookie_header(url).isEmpty()) {
+        emit posts_failed(token, page, QStringLiteral("电脑端微博登录会话未同步，请退出微博登录后重试"));
+        return;
+    }
+    log_weibo_page(QStringLiteral("desktop_request"), {
+        {QStringLiteral("token"), token}, {QStringLiteral("page"), page}});
+    get(url, QStringLiteral("https://s.weibo.com/"), session_->user_agent(), 4'000'000,
+        [this, token, page](const QByteArray& bytes, const QString& error) {
+            if (!error.isEmpty()) {
+                emit posts_failed(token, page, QStringLiteral("电脑端微博页面获取失败，请检查登录状态后重试"));
+                return;
+            }
+            const auto result = parse_desktop_weibo(bytes);
+            QJsonArray ids;
+            for (const auto& item : result.posts) ids.append(item.toObject().value(QStringLiteral("id")));
+            log_weibo_page(QStringLiteral("desktop_response"), {
+                {QStringLiteral("token"), token}, {QStringLiteral("page"), page},
+                {QStringLiteral("count"), result.posts.size()}, {QStringLiteral("ids"), ids},
+                {QStringLiteral("has_more"), result.has_more}, {QStringLiteral("recognized"), result.recognized}});
+            if (result.login_required) {
+                emit posts_failed(token, page, QStringLiteral("电脑端微博登录已失效，请重新登录"));
+            } else if (!result.recognized) {
+                emit posts_failed(token, page, QStringLiteral("电脑端搜索页面暂时无法解析，请重试"));
+            } else {
+                emit posts_ready(token, page, result.posts, true, result.has_more,
+                    result.has_more ? QString{} : QStringLiteral("已加载当前官网搜索结果"));
+            }
+        });
 }
 
 void NewsService::load_comments(const QString& post_id, int token, int page) {

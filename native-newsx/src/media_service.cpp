@@ -66,6 +66,8 @@ MediaService::~MediaService() { cancel(); cancel_images(); }
 
 void MediaService::cancel_images() {
     ++image_token_;
+    pending_images_.clear();
+    scheduled_images_.clear();
     auto replies = std::move(image_replies_);
     image_replies_.clear();
     for (auto* reply : replies) {
@@ -74,7 +76,6 @@ void MediaService::cancel_images() {
         reply->deleteLater();
     }
     image_files_.clear();
-    image_bytes_ = 0;
 }
 
 void MediaService::prepare_images(const QJsonArray& posts) {
@@ -108,56 +109,71 @@ void MediaService::prepare_images(const QJsonArray& posts) {
     }
 
     for (const auto& source : queue) {
-        if (image_files_.size() >= 96 || image_bytes_ >= 64'000'000) break;
-        QUrl url(source);
+        const QUrl url(source);
         if ((url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http")) ||
-            !is_supported_image_host(url) || image_files_.contains(source)) continue;
-        if (url.scheme() != QStringLiteral("https")) url.setScheme(QStringLiteral("https"));
-        const bool avatar = avatars.contains(source);
+            !is_supported_image_host(url) || scheduled_images_.contains(source) ||
+            image_files_.contains(source)) continue;
+        scheduled_images_.insert(source);
+        pending_images_.append({source, avatars.contains(source), 0});
+    }
+    start_images();
+}
+
+void MediaService::start_images() {
+    // Keep transfers bounded without dropping later posts or exhausting a shared byte budget.
+    while (image_replies_.size() < 4 && !pending_images_.isEmpty()) {
+        const auto job = pending_images_.takeFirst();
+        QUrl url(job.source);
+        url.setScheme(QStringLiteral("https"));
         auto file = std::make_shared<QTemporaryFile>(
             QDir(QDir::tempPath()).filePath(QStringLiteral("newsx-image-XXXXXX.img")));
-        if (!file->open()) continue;
-        image_files_.emplace(source, file);
+        if (!file->open()) { scheduled_images_.remove(job.source); continue; }
         const auto request_token = image_token_;
         QNetworkRequest request(url);
-        request.setTransferTimeout(8000);
+        request.setTransferTimeout(20000);
         request.setRawHeader("User-Agent", "Mozilla/5.0");
         request.setRawHeader("Referer", referer_for(url).toUtf8());
         auto* reply = network_.get(request);
         reply->setReadBufferSize(512 * 1024);
         image_replies_.push_back(reply);
         auto bytes = std::make_shared<qint64>(0);
-        connect(reply, &QNetworkReply::readyRead, this,
-                [this, reply, file, bytes, request_token] {
-            if (request_token != image_token_) return;
+        const auto drain = [reply, file, bytes] {
             const auto chunk = reply->readAll();
             *bytes += chunk.size();
-            image_bytes_ += chunk.size();
-            if (*bytes > 8'000'000 || image_bytes_ > 64'000'000 ||
-                file->write(chunk) != chunk.size()) reply->abort();
-        });
+            if (*bytes > 20'000'000 || file->write(chunk) != chunk.size()) reply->abort();
+        };
+        connect(reply, &QNetworkReply::readyRead, this, drain);
         connect(reply, &QNetworkReply::finished, this,
-                [this, reply, file, bytes, source, avatar, request_token] {
+                [this, reply, file, bytes, job, request_token, drain] {
             std::erase(image_replies_, reply);
             if (request_token != image_token_) { reply->deleteLater(); return; }
-            const auto error = reply->error();
-            const auto type = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+            drain();
+            const bool downloaded = reply->error() == QNetworkReply::NoError &&
+                *bytes > 0 && *bytes <= 20'000'000;
             reply->deleteLater();
-            if (error == QNetworkReply::NoError && *bytes > 0 && *bytes <= 8'000'000 &&
-                type.startsWith(QStringLiteral("image/"))) {
-                file->flush();
-                if (avatar) {
-                    file->seek(0);
-                    const auto round = circular_avatar(file->readAll());
+            file->flush();
+            file->seek(0);
+            const auto data = downloaded ? file->readAll() : QByteArray{};
+            QImage decoded;
+            const bool valid = !data.isEmpty() && decoded.loadFromData(data);
+            if (valid) {
+                if (job.avatar) {
+                    const auto round = circular_avatar(data);
                     if (!round.isEmpty()) {
                         file->resize(0);
                         file->seek(0);
                         file->write(round);
+                        file->flush();
                     }
-                    file->flush();
                 }
-                emit image_ready(source, QUrl::fromLocalFile(file->fileName()).toString());
-            } else image_files_.erase(source);
+                image_files_.emplace(job.source, file);
+                emit image_ready(job.source, QUrl::fromLocalFile(file->fileName()).toString());
+            } else if (job.attempt < 2) {
+                pending_images_.append({job.source, job.avatar, job.attempt + 1});
+            } else {
+                scheduled_images_.remove(job.source);
+            }
+            start_images();
         });
     }
 }

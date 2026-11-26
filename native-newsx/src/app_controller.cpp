@@ -1,4 +1,8 @@
 #include "app_controller.h"
+#include "weibo_diagnostics.h"
+#include "weibo_session.h"
+#include "weibo_login_dialog.h"
+#include <QPointer>
 
 #include <QDateTime>
 #include <QDesktopServices>
@@ -209,42 +213,59 @@ AppController::AppController(QObject* parent)
         emit headlineStatusChanged();
     });
     connect(&news_, &NewsService::posts_ready, this,
-            [this](int token, int page, const QJsonArray& rows, bool final) {
-        if (token != detail_token_ || page != post_page_ + 1) return;
+            [this](int token, int page, const QJsonArray& rows, bool final, bool has_more, const QString& status) {
+        if (token != detail_token_ || page != post_page_ + 1 || !final) return;
+        bool added = false;
+        int new_count = 0;
         for (const auto& value : from_json(rows)) {
-            const auto row = value.toMap();
-            const auto url = row.value(QStringLiteral("url")).toString();
+            const auto url = value.toMap().value(QStringLiteral("url")).toString();
+            const auto id = value.toMap().value(QStringLiteral("id")).toString();
+            const auto same_post = [&id, &url](const QVariant& existing) {
+                const auto row = existing.toMap();
+                return !id.isEmpty() ? row.value(QStringLiteral("id")).toString() == id
+                    : row.value(QStringLiteral("url")).toString() == url;
+            };
             bool found = false;
             for (auto& existing : posts_) {
-                if (existing.toMap().value(QStringLiteral("url")).toString() == url) {
-                    existing = value;
+                if (same_post(existing)) {
+                    if (!value.toMap().contains(QStringLiteral("search_source"))) existing = value;
                     found = true;
                     break;
                 }
             }
-            if (!found) posts_.append(value);
-        }
-        media_.prepare_images(rows);
-        emit postsChanged();
-        if (page == 1 || !rows.isEmpty()) set_detail_status({});
-        if (final) {
-            post_page_ = page;
-            if (rows.isEmpty() || (page > 1 && posts_.size() == post_count_before_page_)) {
-                posts_has_more_ = false;
-                emit postsHasMoreChanged();
-                if (page > 1 && rows.isEmpty())
-                    set_detail_status(QStringLiteral("访客接口未开放更多结果"));
+            if (!found) {
+                for (auto& existing : pending_posts_) {
+                    if (same_post(existing)) {
+                        if (!value.toMap().contains(QStringLiteral("search_source"))) existing = value;
+                        found = true;
+                        break;
+                    }
+                }
             }
-            posts_loading_ = false;
-            emit postsLoadingChanged();
+            if (!found) { pending_posts_.append(value); added = true; ++new_count; }
         }
+        log_weibo_page(QStringLiteral("page_merged"), {
+            {QStringLiteral("token"), token}, {QStringLiteral("page"), page},
+            {QStringLiteral("received"), rows.size()}, {QStringLiteral("new_count"), new_count},
+            {QStringLiteral("displayed"), posts_.size()}, {QStringLiteral("pending"), pending_posts_.size()},
+            {QStringLiteral("stop_reason"), added ? QString{} : rows.isEmpty()
+                ? QStringLiteral("parsed_page_empty") : QStringLiteral("page_all_duplicates")}});
+        post_page_ = page;
+        post_source_has_more_ = added && has_more;
+        post_completion_status_ = status;
+        posts_loading_ = false;
+        set_detail_status(added ? QString{} : QStringLiteral("本次未返回更多微博"));
+        append_post_batch();
+        emit postsLoadingChanged();
     });
     connect(&news_, &NewsService::posts_failed, this, [this](int token, int page, const QString& error) {
         if (token != detail_token_ || page != post_page_ + 1) return;
-        posts_has_more_ = false;
-        emit postsHasMoreChanged();
+        // A failed request is retryable; keep the current page and existing posts.
         posts_loading_ = false;
         emit postsLoadingChanged();
+        log_weibo_page(QStringLiteral("page_failed"), {
+            {QStringLiteral("token"), token}, {QStringLiteral("page"), page},
+            {QStringLiteral("error"), error}, {QStringLiteral("displayed"), posts_.size()}});
         set_detail_status(error);
     });
     connect(&news_, &NewsService::comments_ready, this,
@@ -356,7 +377,37 @@ AppController::AppController(QObject* parent)
     headline_timer_.setInterval(settings_.headline_refresh_minutes * 60 * 1000);
     connect(&headline_timer_, &QTimer::timeout, this, &AppController::refreshHeadlines);
     headline_timer_.start();
+    connect(news_.session(), &WeiboSession::statusChanged, this, &AppController::weiboLoginStatusChanged);
+    connect(news_.session(), &WeiboSession::userNameChanged, this, &AppController::weiboUserNameChanged);
+    connect(news_.session(), &WeiboSession::changed, this, [this] {
+        emit weiboSessionChanged();
+        refreshHot();
+        if (!post_keyword_.isEmpty()) {
+            const auto keyword = post_keyword_;
+            const auto url = post_search_url_;
+            openWeibo(keyword, url);
+        }
+    });
     QTimer::singleShot(250, this, &AppController::refresh);
+}
+
+bool AppController::weibo_logged_in() const { return news_.session()->logged_in(); }
+QObject* AppController::weibo_session() const { return news_.session(); }
+QString AppController::weibo_user_name() const { return news_.session()->user_name(); }
+void AppController::logoutWeibo() { news_.session()->logout(); }
+QString AppController::weibo_login_status() const { return news_.session()->status(); }
+void AppController::openWeiboLogin(QWindow* owner) {
+    // Create/activate native UI after the QML mouse handler has returned.
+    const QPointer<QWindow> guarded_owner(owner);
+    QTimer::singleShot(0, this, [this, guarded_owner] {
+        // A hidden Qt native host may have destroyed its HWND. Never reuse a
+        // controller belonging to a closed window; teardown runs on this queued turn.
+        if (!weibo_login_dialog_ || !weibo_login_dialog_->isVisible() || weibo_login_dialog_->initialization_failed())
+            weibo_login_dialog_ = std::make_unique<WeiboLoginDialog>(*news_.session(), guarded_owner.data());
+        weibo_login_dialog_->show();
+        weibo_login_dialog_->raise();
+        weibo_login_dialog_->activateWindow();
+    });
 }
 
 AppController::~AppController() {
@@ -483,10 +534,18 @@ void AppController::setAlwaysOnTop(bool value) {
 }
 
 void AppController::setMinimalMode(bool value) {
-    if (settings_.minimal_mode == value) return;
-    settings_.minimal_mode = value;
+    setWindowMode(value ? QStringLiteral("minimal") : QStringLiteral("normal"));
+}
+
+void AppController::setWindowMode(const QString& value) {
+    if (value != QStringLiteral("normal") && value != QStringLiteral("minimal") && value != QStringLiteral("hidden")) return;
+    if (settings_.window_mode == value) return;
+    const bool old_minimal = settings_.minimal_mode;
+    settings_.window_mode = value;
+    settings_.minimal_mode = value == QStringLiteral("minimal");
     save_settings(settings_);
-    emit minimalModeChanged();
+    emit windowModeChanged();
+    if (old_minimal != settings_.minimal_mode) emit minimalModeChanged();
 }
 
 void AppController::setMinimalCard(const QString& value) {
@@ -562,7 +621,9 @@ void AppController::openWeibo(const QString& keyword, const QString& search_url)
     post_keyword_ = keyword;
     post_search_url_ = search_url;
     post_page_ = 0;
-    post_count_before_page_ = 0;
+    pending_posts_.clear();
+    post_source_has_more_ = true;
+    post_completion_status_.clear();
     posts_loading_ = true;
     posts_has_more_ = true;
     emit postsLoadingChanged();
@@ -578,10 +639,33 @@ void AppController::openWeibo(const QString& keyword, const QString& search_url)
     news_.load_weibo_posts(keyword, post_search_url_, detail_token_);
 }
 
+void AppController::append_post_batch() {
+    QJsonArray images;
+    const auto count = std::min<qsizetype>(10, pending_posts_.size());
+    for (qsizetype i = 0; i < count; ++i) {
+        const auto value = pending_posts_.takeFirst();
+        posts_.append(value);
+        images.append(QJsonObject::fromVariantMap(value.toMap()));
+    }
+    posts_has_more_ = !pending_posts_.isEmpty() || post_source_has_more_;
+    if (!posts_has_more_ && !post_completion_status_.isEmpty()) set_detail_status(post_completion_status_);
+    log_weibo_page(QStringLiteral("batch_displayed"), {
+        {QStringLiteral("token"), detail_token_}, {QStringLiteral("page"), post_page_},
+        {QStringLiteral("added"), count}, {QStringLiteral("displayed"), posts_.size()},
+        {QStringLiteral("pending"), pending_posts_.size()}, {QStringLiteral("has_more"), posts_has_more_}});
+    media_.prepare_images(images);
+    emit postsChanged();
+    emit postsHasMoreChanged();
+}
+
 void AppController::loadMoreWeibo() {
     if (post_keyword_.isEmpty() || posts_loading_ || !posts_has_more_) return;
+    set_detail_status({});
+    if (!pending_posts_.isEmpty()) {
+        append_post_batch();
+        return;
+    }
     posts_loading_ = true;
-    post_count_before_page_ = posts_.size();
     emit postsLoadingChanged();
     news_.load_more_weibo_posts(post_keyword_, post_search_url_, detail_token_, post_page_ + 1);
 }
@@ -691,7 +775,6 @@ void AppController::cancelMedia() {
     post_keyword_.clear();
     post_search_url_.clear();
     post_page_ = 0;
-    post_count_before_page_ = 0;
     if (posts_loading_) { posts_loading_ = false; emit postsLoadingChanged(); }
     if (posts_has_more_) { posts_has_more_ = false; emit postsHasMoreChanged(); }
 }

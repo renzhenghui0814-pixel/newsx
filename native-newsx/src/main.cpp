@@ -3,6 +3,9 @@
 #include <QApplication>
 #include <QAction>
 #include <QIcon>
+#include <QDir>
+#include <QFile>
+#include <QQmlError>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -25,8 +28,24 @@ int main(int argc, char* argv[]) {
     newsx::AppController controller;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("app"), &controller);
+    QStringList startup_errors;
+    const auto startup_warnings = QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+        [&startup_errors](const QList<QQmlError>& errors) {
+            for (const auto& error : errors) {
+                if (startup_errors.size() < 64) startup_errors.append(error.toString());
+            }
+        });
     engine.loadFromModule(QStringLiteral("NewsX"), QStringLiteral("Main"));
-    if (engine.rootObjects().isEmpty()) return 1;
+    QObject::disconnect(startup_warnings);
+    if (engine.rootObjects().isEmpty()) {
+        QDir().mkpath(newsx::app_data_dir());
+        QFile log(QDir(newsx::app_data_dir()).filePath(QStringLiteral("startup-error.log")));
+        if (log.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            log.write("NewsX main window failed to load.\n");
+            log.write(startup_errors.join(QLatin1Char('\n')).toUtf8());
+        }
+        return 1;
+    }
     auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first());
     QMenu tray_menu;
     auto* show_action = tray_menu.addAction(QStringLiteral("显示组件"));

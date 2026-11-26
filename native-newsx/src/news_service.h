@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QString>
@@ -8,12 +9,14 @@
 #include <functional>
 
 namespace newsx {
+class WeiboSession;
 
 class NewsService final : public QObject {
     Q_OBJECT
 public:
-    explicit NewsService(QObject* parent = nullptr);
+    explicit NewsService(QObject* parent = nullptr, bool restore_session = true);
     ~NewsService() override;
+    WeiboSession* session() const { return session_; }
 
     void refresh_hot(const QString& custom_url = {});
     void refresh_headlines();
@@ -27,7 +30,7 @@ signals:
     void hot_failed(QString message);
     void headlines_ready(QJsonArray items);
     void headlines_failed(QString message);
-    void posts_ready(int token, int page, QJsonArray items, bool final);
+    void posts_ready(int token, int page, QJsonArray items, bool final, bool has_more = true, QString status = {});
     void posts_failed(int token, int page, QString message);
     void comments_ready(int token, QString post_id, int page, QJsonArray items, bool has_more);
     void comments_failed(int token, QString post_id, int page, QString message);
@@ -42,10 +45,12 @@ private:
     void hot_page(int attempt);
     void ensure_visitor(std::function<void(QByteArray)> ready);
     void search_weibo(const QString& keyword, const QString& search_url,
-                      int token, int page, int attempt);
+                      int token, int page, int attempt, bool realtime = false);
+    void search_desktop_weibo(const QString& keyword, const QString& search_url, int token, int page);
 
     QNetworkAccessManager network_;
     QByteArray visitor_cookie_;
+    WeiboSession* session_ = nullptr;
 };
 
 } // namespace newsx

@@ -7,8 +7,8 @@ Item {
     property bool showTurnover: false
     property bool detailed: false
     property bool darkMode: true
-    property color foreground: "#f4f7f9"
-    property color secondary: "#a5b9c4"
+    property color foreground: "#f2f2f2"
+    property color secondary: "#bdbdbd"
     property color divider: secondary
     property color tone: row.change && row.change.length > 0
         ? (row.changeValue < 0 ? (darkMode ? "#80dcb9" : "#228268")

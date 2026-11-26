@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import NewsX
 import "components"
 
 Window {
@@ -19,14 +20,25 @@ Window {
     flags: Qt.Tool | Qt.FramelessWindowHint | (app.alwaysOnTop ? Qt.WindowStaysOnTopHint : 0)
 
     property string page: "home"
+    property bool weiboUseFallback: false
+    property bool weiboOpening: false
+    property bool weiboLoginNotice: false
     property string selectedSymbol: ""
     property string selectedTitle: ""
     property string selectedUrl: ""
     property string sourcePage: "home"
     property int playingPost: -1
-    property bool controlsVisible: shellHover.hovered && headerReady && !compactActive
+    property var modeMenu: null
+    readonly property bool modeMenuVisible: modeMenu ? modeMenu.visible : false
+    readonly property bool modeMenuHovered: modeMenu ? modeMenuVisible && modeMenu.pointerInside : false
+    readonly property bool shellHovered: shellHover.hovered || modeMenuHovered || (websiteLoader.item
+        ? (websiteLoader.item.pointerOverWindow || websiteLoader.item.isPointerOverWindow()) : false)
+        || (xiaohongshuLoader.item ? (xiaohongshuLoader.item.pointerOverWindow
+            || xiaohongshuLoader.item.isPointerOverWindow()) : false)
+    property bool controlsVisible: (shellHovered || window.modeMenuVisible) && headerReady && !compactActive
+    readonly property string windowMode: app.windowMode
     property bool minimalModeEnabled: app.minimalMode
-    property bool shouldCompact: minimalModeEnabled && page === "home" && !expandOnHover
+    property bool shouldCompact: minimalModeEnabled && page === "home" && !weiboOpening && !expandOnHover && !window.modeMenuVisible
     property bool compactActive: false
     property bool headerReady: !app.minimalMode
     property bool animationsReady: false
@@ -42,20 +54,48 @@ Window {
     property string selectedExchange: "SH"
     property string stockPopupError: ""
     property bool frequencyOpen: false
+    property bool weiboAccountOpen: false
     property string frequencyError: ""
     property bool dark: app.theme === "dark"
     property real imageScale: Math.max(1, Math.min(2, window.screen ? window.screen.devicePixelRatio : 1))
     property real fontScale: 1.15
-    property color canvasColor: dark ? "#17242d" : "#eff3f6"
-    property color cardColor: dark ? "#344854" : "#f9fbfc"
-    property color foreground: dark ? "#f4f7f9" : "#213340"
-    property color secondary: dark ? "#bdd0d9" : "#617480"
-    property color divider: dark ? "#4c616d" : "#d8e2e8"
+    property color canvasColor: dark ? "#000000" : "#eff3f6"
+    property color cardColor: dark ? "#171717" : "#f9fbfc"
+    property color foreground: dark ? "#f2f2f2" : "#213340"
+    property color secondary: dark ? "#bdbdbd" : "#617480"
+    property color divider: dark ? "#373737" : "#d8e2e8"
     property color accent: dark ? "#8cc8ef" : "#397fbd"
     property color linkInk: dark ? "#68d7ff" : "#176da9"
+    palette: dark ? darkControls : undefined
+    Palette {
+        id: darkControls
+        window: "#171717"
+        windowText: "#f2f2f2"
+        base: "#111111"
+        text: "#f2f2f2"
+        placeholderText: "#bdbdbd"
+        button: "#262626"
+        buttonText: "#f2f2f2"
+        toolTipBase: "#222222"
+        toolTipText: "#f2f2f2"
+        mid: "#373737"
+        dark: "#303030"
+        brightText: "#f2f2f2"
+        highlight: "#8cc8ef"
+        highlightedText: "#000000"
+        link: "#68d7ff"
+    }
     Component.onCompleted: {
         compactActive = app.minimalMode
         Qt.callLater(() => animationsReady = true)
+    }
+    onShellHoveredChanged: {
+        if (shellHovered) {
+            if (!compactActive && minimalModeEnabled && page === "home") expandOnHover = true
+        } else {
+            expandOnHover = false
+            opacityOpen = false
+        }
     }
     onShouldCompactChanged: {
         if (shouldCompact) {
@@ -83,8 +123,39 @@ Window {
             compactCard.switchOffset = 0
         }
     }
+    EdgeHideController {
+        id: edgeHide
+        hostWindow: window
+        enabled: window.windowMode === "hidden"
+        blocked: window.modeMenuVisible || window.opacityOpen || window.frequencyOpen
+            || window.weiboAccountOpen || window.stockPopup.length > 0 || compactHeightAnimation.running
+        onSettled: geometryTimer.restart()
+    }
     onPageChanged: if (page === "home") app.requestIdleCleanup()
 
+    function closeModeMenu() {
+        if (modeMenu) modeMenu.close()
+    }
+    function toggleModeMenu(button) {
+        if (modeMenuVisible) { closeModeMenu(); return }
+        opacityOpen = false
+        const popup = modeMenuComponent.createObject(shell)
+        if (!popup) return
+        modeMenu = popup
+        const point = button.mapToItem(shell, 0, button.height)
+        popup.x = Math.max(12, Math.min(shell.width - popup.width - 12, point.x))
+        popup.y = point.y + 4
+        popup.currentIndex = -1
+        popup.open()
+    }
+    function selectWindowMode(value) {
+        closeModeMenu()
+        // Let the popup release mouse capture before changing window geometry.
+        Qt.callLater(() => {
+            window.expandOnHover = value === "minimal" && window.shellHovered
+            app.setWindowMode(value)
+        })
+    }
     function fs(size) { return Math.round(size * fontScale) }
     function marketHeaderTime(value) {
         const raw = String(value || "")
@@ -92,8 +163,24 @@ Window {
             ? Qt.formatDate(new Date(), "MM-dd") + " " + raw.slice(0, 5) : raw
     }
 
-    function showPage(value) { playingPost = -1; stockPopup = ""; frequencyOpen = false; app.cancelMedia(); page = value }
+    function showPage(value) {
+        playingPost = -1
+        stockPopup = ""
+        frequencyOpen = false
+        weiboAccountOpen = false
+        app.cancelMedia()
+        page = value
+        weiboOpening = false
+        weiboLoginNotice = false
+    }
+    function openWeiboAccount() {
+        frequencyOpen = false
+        stockPopup = ""
+        opacityOpen = false
+        weiboAccountOpen = !weiboAccountOpen
+    }
     function openFrequency() {
+        weiboAccountOpen = false
         stockPopup = ""
         frequencyError = ""
         frequencyMinutesInput.text = String(page === "weibo" ? app.hotRefreshMinutes : app.headlineRefreshMinutes)
@@ -130,18 +217,22 @@ Window {
         stockPopupError = ""
     }
     function goBack() {
-        if (page === "quote" || page === "weiboDetail" || page === "article") showPage(sourcePage)
+        if (page === "xiaohongshu" && xiaohongshuLoader.item) xiaohongshuLoader.item.goBack()
+        else if (weiboOpening) weiboOpening = false
+        else if (page === "quote" || page === "weiboDetail" || page === "article") showPage(sourcePage)
         else showPage("home")
     }
     function openQuote(symbol) { sourcePage = page; selectedSymbol = symbol; showPage("quote") }
     function openHot(title, url, rank) {
-        const target = "https://s.weibo.com/weibo?q=" + encodeURIComponent("#" + title + "#")
-            + "&t=31" + (rank > 0 ? "&band_rank=" + rank : "") + "&Refer=top"
+        const target = "https://m.weibo.cn/p/index?containerid="
+            + encodeURIComponent("100103type=1&q=#" + title + "#") + "&page_type=searchall"
+        weiboOpening = false
+        weiboLoginNotice = false
         selectedTitle = title
         selectedUrl = target
+        weiboUseFallback = false
         sourcePage = page
-        showPage("weiboDetail")
-        app.openWeibo(title, selectedUrl)
+        weiboOpening = true
     }
     function escapePostText(value) {
         return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
@@ -224,7 +315,14 @@ Window {
             }
         }
     }
-    Timer { id: geometryTimer; interval: 350; onTriggered: app.saveWindow(window.x, window.y, window.width, window.expandedHeight) }
+    Timer {
+        id: geometryTimer
+        interval: 350
+        onTriggered: {
+            const saved = edgeHide.savedGeometry()
+            app.saveWindow(saved.x, saved.y, window.width, window.expandedHeight)
+        }
+    }
     Timer { id: collapseTimer; interval: 230; onTriggered: if (window.shouldCompact) window.compactActive = true }
     Timer {
         id: headerRevealTimer
@@ -233,12 +331,22 @@ Window {
                 && Math.abs(window.height - window.expandedHeight) < 1) window.headerReady = true
     }
 
-    Shortcut { sequence: "Escape"; onActivated: { if (frequencyOpen) frequencyOpen = false; else if (stockPopup.length > 0) stockPopup = ""; else if (opacityOpen) opacityOpen = false; else window.goBack() } }
+    Shortcut { sequence: "Escape"; onActivated: { if (window.modeMenuVisible) window.closeModeMenu(); else if (weiboAccountOpen) weiboAccountOpen = false; else if (frequencyOpen) frequencyOpen = false; else if (stockPopup.length > 0) stockPopup = ""; else if (opacityOpen) opacityOpen = false; else window.goBack() } }
     Shortcut { sequence: "Ctrl+1"; onActivated: window.showPage("stocks") }
     Shortcut { sequence: "Ctrl+2"; onActivated: window.showPage("weibo") }
     Shortcut { sequence: "Ctrl+3"; onActivated: window.showPage("cls") }
     Shortcut { sequence: "Ctrl+4"; onActivated: window.showPage("cls") }
-    Shortcut { sequence: "Ctrl+R"; onActivated: { if (page === "weibo") app.refreshHot(); else if (page === "cls") app.refreshHeadlines(); else app.refresh() } }
+    Shortcut { sequence: "Ctrl+5"; onActivated: window.showPage("xiaohongshu") }
+    Shortcut {
+        sequence: "Ctrl+R"
+        onActivated: {
+            if (xiaohongshuLoader.item && xiaohongshuLoader.visible) xiaohongshuLoader.item.refresh()
+            else if (websiteLoader.item && websiteLoader.visible) websiteLoader.item.refresh()
+            else if (page === "weibo") app.refreshHot()
+            else if (page === "cls") app.refreshHeadlines()
+            else app.refresh()
+        }
+    }
 
     Rectangle {
         id: shell
@@ -253,15 +361,6 @@ Window {
 
         HoverHandler {
             id: shellHover
-            onHoveredChanged: {
-                if (hovered) {
-                    if (!window.compactActive && window.minimalModeEnabled && window.page === "home")
-                        window.expandOnHover = true
-                } else {
-                    window.expandOnHover = false
-                    window.opacityOpen = false
-                }
-            }
         }
 
         Item {
@@ -289,58 +388,56 @@ Window {
             Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 8
+                spacing: window.width < 390 ? 4 : 8
                 opacity: window.controlsVisible ? 1 : 0
                 enabled: window.controlsVisible
                 Behavior on opacity { NumberAnimation { duration: 130 } }
                 Repeater {
-                    model: [ {hint: "极简模式", action: "minimal"},
+                    model: [ {hint: "小红书", action: "xiaohongshu"},
+                             {hint: "模式切换", action: "mode"},
                              {hint: "切换主题", action: "theme"},
                              {hint: "调整透明度", action: "opacity"},
                              {hint: "关闭组件", action: "close"} ]
                     delegate: Rectangle {
                         required property var modelData
-                        property color iconColor: actionArea.containsMouse || (modelData.action === "minimal" && window.minimalModeEnabled) ? window.accent : window.secondary
-                        width: 40; height: 40; radius: 10
-                        color: actionArea.containsMouse ? (window.dark ? "#3b5360" : "#dae7ee") : "transparent"
+                        property color iconColor: actionArea.containsMouse || xiaohongshuButton.hovered ? window.accent : window.secondary
+                        width: window.width < 390 ? 32 : 40
+                        height: 40; radius: 10
+                        color: actionArea.containsMouse || xiaohongshuButton.hovered ? (window.dark ? "#2a2a2a" : "#dae7ee") : "transparent"
+                        ToolButton {
+                            id: xiaohongshuButton
+                            visible: modelData.action === "xiaohongshu"
+                            anchors.fill: parent
+                            icon.source: "qrc:/resources/xiaohongshu.svg"
+                            icon.width: 24; icon.height: 24
+                            icon.color: parent.iconColor
+                            background: Item {}
+                            Accessible.name: "打开小红书"
+                            onClicked: window.showPage("xiaohongshu")
+                            ToolTip.visible: hovered && window.controlsVisible
+                            ToolTip.text: "小红书"
+                        }
                         Text {
-                            visible: modelData.action !== "opacity" && modelData.action !== "minimal"
+                            visible: modelData.action !== "opacity" && modelData.action !== "mode" && modelData.action !== "xiaohongshu"
                             anchors.centerIn: parent
                             text: modelData.action === "theme" ? (window.dark ? "\ue706" : "\ue708") : "\ue8bb"
                             color: parent.iconColor
                             font.family: "Segoe MDL2 Assets"
-                            font.pixelSize: window.fs(18)
+                            font.pixelSize: window.fs(modelData.action === "close" ? 15 : 18)
                         }
-                        Canvas {
-                            id: minimalIcon
-                            visible: modelData.action === "minimal"
-                            anchors.centerIn: parent
-                            width: 20; height: 20
-                            property color ink: parent.iconColor
-                            property bool expanded: window.minimalModeEnabled
-                            onInkChanged: requestPaint()
-                            onExpandedChanged: requestPaint()
-                            onPaint: {
-                                const painter = getContext("2d")
-                                painter.clearRect(0, 0, width, height)
-                                painter.strokeStyle = ink
-                                painter.lineWidth = 1.8
-                                painter.lineCap = "round"
-                                painter.lineJoin = "round"
-                                painter.beginPath()
-                                if (expanded) {
-                                    painter.moveTo(8, 8); painter.lineTo(3, 3)
-                                    painter.moveTo(3, 7); painter.lineTo(3, 3); painter.lineTo(7, 3)
-                                    painter.moveTo(12, 12); painter.lineTo(17, 17)
-                                    painter.moveTo(13, 17); painter.lineTo(17, 17); painter.lineTo(17, 13)
-                                } else {
-                                    painter.moveTo(3, 3); painter.lineTo(8, 8)
-                                    painter.moveTo(4, 8); painter.lineTo(8, 8); painter.lineTo(8, 4)
-                                    painter.moveTo(17, 17); painter.lineTo(12, 12)
-                                    painter.moveTo(12, 16); painter.lineTo(12, 12); painter.lineTo(16, 12)
-                                }
-                                painter.stroke()
-                            }
+                        ToolButton {
+                            id: modeButton
+                            visible: modelData.action === "mode"
+                            hoverEnabled: false
+                            anchors.fill: parent
+                            icon.source: "qrc:/resources/mode-" + window.windowMode + ".svg"
+                            icon.width: 22; icon.height: 22
+                            icon.color: parent.iconColor
+                            background: Item {}
+                            Accessible.name: "模式切换"
+                            Accessible.description: window.windowMode === "normal" ? "当前为常规模式"
+                                : window.windowMode === "minimal" ? "当前为极简模式" : "当前为隐藏模式"
+                            onClicked: window.toggleModeMenu(modeButton)
                         }
                         Canvas {
                             visible: modelData.action === "opacity"
@@ -364,23 +461,104 @@ Window {
                             }
                         }
                         MouseArea { id: actionArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            visible: modelData.action !== "xiaohongshu"
                             onClicked: {
-                                if (modelData.action === "minimal") {
-                                    window.opacityOpen = false
-                                    window.expandOnHover = shellHover.hovered
-                                    app.setMinimalMode(!window.minimalModeEnabled)
-                                }
+                                if (modelData.action === "mode") window.toggleModeMenu(modeButton)
                                 else if (modelData.action === "theme") { window.opacityOpen = false; app.toggleTheme() }
                                 else if (modelData.action === "opacity") window.opacityOpen = !window.opacityOpen
                                 else window.close()
                             }
-                            ToolTip.visible: containsMouse && window.controlsVisible
-                            ToolTip.text: modelData.action === "minimal"
-                                ? (window.minimalModeEnabled ? "关闭极简模式" : "开启极简模式") : modelData.hint
+                            ToolTip.visible: containsMouse && window.controlsVisible && !window.modeMenuVisible
+                            ToolTip.text: modelData.hint
                         }
                     }
                 }
             }
+        }
+
+        Component {
+            id: modeMenuComponent
+            Menu {
+                id: popup
+                readonly property bool pointerInside: modeMenuPointer.hovered
+                parent: shell
+                width: 190
+                padding: 6
+                // A separate popup window stays above the native WebView2 child
+                // without hiding or interrupting the page beneath the menu.
+                popupType: Popup.Window
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                onClosed: {
+                    currentIndex = -1
+                    // Do not retain a hidden popup window or its previous input state.
+                    const closedPopup = popup
+                    Qt.callLater(() => {
+                        if (window.modeMenu === closedPopup) window.modeMenu = null
+                        closedPopup.destroy()
+                    })
+                }
+                palette.window: window.cardColor
+                palette.windowText: window.foreground
+                palette.text: window.foreground
+                palette.light: Qt.tint(window.cardColor, Qt.rgba(window.accent.r, window.accent.g, window.accent.b, 0.14))
+                palette.midlight: Qt.tint(window.cardColor, Qt.rgba(window.accent.r, window.accent.g, window.accent.b, 0.24))
+                palette.dark: window.divider
+                background: Rectangle {
+                    radius: 14
+                    color: window.cardColor
+                    border.color: window.divider
+                    border.width: 1
+                }
+                contentItem: ListView {
+                    implicitHeight: contentHeight
+                    model: popup.contentModel
+                    currentIndex: popup.currentIndex
+                    interactive: false
+                    clip: true
+                    spacing: 2
+                    highlightMoveDuration: 0
+                    highlightResizeDuration: 0
+                    HoverHandler { id: modeMenuPointer }
+                }
+                ModeMenuItem {
+                    text: "常规模式"; modeValue: "normal"
+                    currentMode: window.windowMode
+                    pointerInMenu: modeMenuPointer.hovered
+                    fontScale: window.fontScale
+                    foreground: window.foreground; accent: window.accent
+                    onTriggered: window.selectWindowMode(modeValue)
+                }
+                ModeMenuItem {
+                    text: "极简模式"; modeValue: "minimal"
+                    currentMode: window.windowMode
+                    pointerInMenu: modeMenuPointer.hovered
+                    fontScale: window.fontScale
+                    foreground: window.foreground; accent: window.accent
+                    onTriggered: window.selectWindowMode(modeValue)
+                }
+                ModeMenuItem {
+                    text: "隐藏模式"; modeValue: "hidden"
+                    currentMode: window.windowMode
+                    pointerInMenu: modeMenuPointer.hovered
+                    fontScale: window.fontScale
+                    foreground: window.foreground; accent: window.accent
+                    onTriggered: window.selectWindowMode(modeValue)
+                }
+            }
+        }
+
+        Rectangle {
+            z: 30
+            visible: edgeHide.hidden
+            readonly property bool horizontalHandle: edgeHide.dockEdge === Qt.TopEdge || edgeHide.dockEdge === Qt.BottomEdge
+            x: horizontalHandle ? (parent.width - width) / 2
+                : edgeHide.dockEdge === Qt.LeftEdge ? parent.width - width : 0
+            y: horizontalHandle ? (edgeHide.dockEdge === Qt.TopEdge ? parent.height - height : 0)
+                : (parent.height - height) / 2
+            width: horizontalHandle ? Math.min(64, parent.width - 32) : 4
+            height: horizontalHandle ? 4 : Math.min(64, parent.height - 32)
+            radius: 2
+            color: window.accent
         }
 
         MouseArea {
@@ -425,7 +603,7 @@ Window {
                     y: opacitySlider.topPadding
                     width: 4; height: opacitySlider.availableHeight
                     radius: 2
-                    color: window.dark ? "#536b79" : "#d3dee4"
+                    color: window.dark ? "#484848" : "#d3dee4"
                     Rectangle {
                         anchors.bottom: parent.bottom
                         width: parent.width
@@ -462,13 +640,13 @@ Window {
                 interactive: false
                 WheelScroller { view: homeView }
                 anchors.fill: parent
-                visible: window.page === "home"
+                visible: window.page === "home" && !window.weiboOpening
                 opacity: window.compactActive ? 0 : 1
                 Behavior on opacity { NumberAnimation { duration: 160 } }
                 contentWidth: width
                 contentHeight: homeColumn.implicitHeight
                 clip: true
-                ScrollBarIndicator { host: shell; view: homeView; offsetY: content.y; hovered: shellHover.hovered && window.headerReady && !window.shouldCompact && !window.compactActive && !compactHeightAnimation.running; ink: window.dark ? "#91a9b5" : "#7e97a4" }
+                ScrollBarIndicator { host: shell; view: homeView; offsetY: content.y; hovered: shellHover.hovered && window.headerReady && !window.shouldCompact && !window.compactActive && !compactHeightAnimation.running; ink: window.dark ? "#a0a0a0" : "#7e97a4" }
                 Column {
                     id: homeColumn
                     width: homeView.width
@@ -604,7 +782,7 @@ Window {
                     //拖动不滚动页面，只允许滚轮与滚动条
                     interactive: false
                     WheelScroller { view: stockList }
-                    ScrollBarIndicator { host: shell; view: stockList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#91a9b5" : "#7e97a4" }
+                    ScrollBarIndicator { host: shell; view: stockList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#a0a0a0" : "#7e97a4" }
                     anchors.top: stockColumns.bottom
                     anchors.bottom: stockFooter.top
                     width: parent.width
@@ -640,7 +818,7 @@ Window {
                             delegate: Rectangle {
                                 required property var modelData
                                 width: 28; height: 28; radius: 7
-                                color: footerArea.containsMouse ? (window.dark ? "#3d5664" : "#dceaf4") : "transparent"
+                                color: footerArea.containsMouse ? (window.dark ? "#2a2a2a" : "#dceaf4") : "transparent"
                                 Text { anchors.centerIn: parent; text: modelData.icon; color: footerArea.containsMouse ? window.accent : window.secondary; font.family: "Segoe MDL2 Assets"; font.pixelSize: window.fs(18) }
                                 MouseArea {
                                     id: footerArea; anchors.fill: parent; hoverEnabled: true
@@ -671,6 +849,7 @@ Window {
             Loader {
                 anchors.fill: parent
                 active: window.page === "weibo" || window.page === "cls"
+                visible: !window.weiboOpening
                 sourceComponent: Component { Item {
                 anchors.fill: parent
                 DetailHeader {
@@ -688,7 +867,7 @@ Window {
                     //拖动不滚动页面，只允许滚轮与滚动条
                     interactive: false
                     WheelScroller { view: boardList }
-                    ScrollBarIndicator { host: shell; view: boardList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#91a9b5" : "#7e97a4" }
+                    ScrollBarIndicator { host: shell; view: boardList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#a0a0a0" : "#7e97a4" }
                     anchors.top: boardHeader.bottom; anchors.bottom: boardFooter.top; width: parent.width
                     model: window.page === "weibo" ? app.hotItems : app.headlines
                     reuseItems: true; clip: true
@@ -713,7 +892,7 @@ Window {
                     Rectangle {
                         visible: window.controlsVisible
                         x: 1; y: 4; width: 28; height: 28; radius: 8
-                        color: frequencyArea.containsMouse ? (window.dark ? "#3b5360" : "#dceaf4") : "transparent"
+                        color: frequencyArea.containsMouse ? (window.dark ? "#2a2a2a" : "#dceaf4") : "transparent"
                         Text {
                             anchors.centerIn: parent; text: "\ue713"
                             color: frequencyArea.containsMouse ? window.accent : window.secondary
@@ -727,9 +906,30 @@ Window {
                             ToolTip.text: "设置刷新频率"
                         }
                     }
+                    ToolButton {
+                        id: weiboLoginButton
+                        visible: window.controlsVisible && window.page === "weibo"
+                        x: 35; y: 4; width: 28; height: 28
+                        icon.source: "qrc:/resources/weibo.svg"
+                        padding: 0
+                        icon.width: window.fs(18); icon.height: window.fs(18)
+                        icon.color: hovered ? window.accent : window.secondary
+                        focusPolicy: Qt.StrongFocus
+                        Accessible.name: app.weiboLoggedIn ? "管理微博登录" : "登录新浪微博"
+                        Accessible.description: app.weiboLoginStatus
+                        onClicked: window.openWeiboAccount()
+                        ToolTip.visible: !window.weiboAccountOpen && (hovered || activeFocus)
+                        ToolTip.text: app.weiboLoginStatus + (app.weiboLoggedIn ? " · 点击管理" : " · 点击登录")
+                        background: Rectangle {
+                            radius: 8
+                            color: weiboLoginButton.hovered ? (window.dark ? "#2a2a2a" : "#dceaf4") : "transparent"
+                            border.width: weiboLoginButton.activeFocus ? 1 : 0
+                            border.color: window.accent
+                        }
+                    }
                     Text {
                         text: window.page === "weibo"
-                            ? [app.hotOrigin, app.hotStatus, app.hotTime].filter(value => value).join(" · ")
+                            ? [app.weiboLoggedIn ? "已登录" : "匿名", app.hotOrigin, app.hotStatus, app.hotTime].filter(value => value).join(" · ")
                             : [app.headlineStatus, app.headlineTime].filter(value => value).join(" · ")
                         color: window.secondary; font.pixelSize: window.fs(11)
                         anchors.right: parent.right; anchors.rightMargin: 4
@@ -778,7 +978,7 @@ Window {
                     //拖动不滚动页面，只允许滚轮与滚动条
                     interactive: false
                     WheelScroller { view: quoteView }
-                    ScrollBarIndicator { host: shell; view: quoteView; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#91a9b5" : "#7e97a4" }
+                    ScrollBarIndicator { host: shell; view: quoteView; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#a0a0a0" : "#7e97a4" }
                     anchors.top: quoteHeader.bottom
                     anchors.bottom: quoteFooter.top
                     width: parent.width
@@ -805,7 +1005,7 @@ Window {
                                 width: 28; height: 28; radius: 8
                                 anchors.right: parent.right; anchors.rightMargin: 4
                                 y: 3
-                                color: removeArea.containsMouse ? (window.dark ? "#4d6778" : "#dceaf4") : "transparent"
+                                color: removeArea.containsMouse ? (window.dark ? "#303030" : "#dceaf4") : "transparent"
                                 Rectangle {
                                     width: 15; height: 15; radius: 8
                                     anchors.centerIn: parent
@@ -862,7 +1062,7 @@ Window {
                                     width: parent.width; height: quotePage.bookRowHeight
                                     Rectangle {
                                         anchors.fill: parent; radius: 6
-                                        color: levelHover.containsMouse ? (window.dark ? "#324a58" : "#dceaf4") : "transparent"
+                                        color: levelHover.containsMouse ? (window.dark ? "#2a2a2a" : "#dceaf4") : "transparent"
                                     }
                                     MouseArea { id: levelHover; anchors.fill: parent; acceptedButtons: Qt.NoButton; hoverEnabled: true }
                                     Text { text: (sell ? "卖" : "买") + (levelIndex + 1); x: 4; width: Math.round(38 * window.fontScale); color: parent.ink; font.pixelSize: window.fs(11); font.weight: Font.DemiBold; anchors.verticalCenter: parent.verticalCenter }
@@ -873,7 +1073,7 @@ Window {
                                         width: Math.max(30, parent.width - x - 60)
                                         height: 8; radius: 3
                                         anchors.verticalCenter: parent.verticalCenter
-                                        color: window.dark ? "#364853" : "#d3dee4"
+                                        color: window.dark ? "#272727" : "#d3dee4"
                                         Rectangle {
                                             visible: levelVolume > 0
                                             width: Math.min(parent.width,
@@ -906,11 +1106,88 @@ Window {
             }
 
             Loader {
+                id: xiaohongshuLoader
                 anchors.fill: parent
-                active: window.page === "weiboDetail"
+                active: window.page === "xiaohongshu"
+                visible: active
+                sourceComponent: Component { XiaohongshuWebsite {
+                    appController: app
+                    fontScale: window.fontScale
+                    darkTheme: window.dark
+                    pageBackground: window.canvasColor
+                    foreground: window.foreground
+                    secondary: window.secondary
+                    surface: window.cardColor
+                    unobscured: !window.opacityOpen && !window.frequencyOpen && !window.weiboAccountOpen && window.stockPopup.length === 0
+                    onBack: window.showPage("home")
+                } }
+            }
+
+            Loader {
+                id: websiteLoader
+                anchors.fill: parent
+                active: window.weiboOpening || (window.page === "weiboDetail" && !window.weiboUseFallback)
+                visible: window.weiboOpening || window.page === "weiboDetail"
+                sourceComponent: Component { WeiboWebsite {
+                    appController: app
+                    topic: window.selectedTitle
+                    darkTheme: window.dark
+                    pageBackground: window.canvasColor
+                    fontScale: window.fontScale
+                    foreground: window.foreground; secondary: window.secondary
+                    surface: window.cardColor
+                    openingFromSource: window.weiboOpening
+                    unobscured: !window.opacityOpen && !window.frequencyOpen && !window.weiboAccountOpen && window.stockPopup.length === 0
+                    id: website
+                    onPageReadyChanged: if (pageReady && window.weiboOpening) window.showPage("weiboDetail")
+                    onPageFailedChanged: if (pageFailed && window.weiboOpening) window.showPage("weiboDetail")
+                    onLoginBlockedBeforeContentChanged: if (loginBlockedBeforeContent && window.weiboOpening) {
+                        Qt.callLater(() => {
+                            if (websiteLoader.item === website && window.weiboOpening && website.loginBlockedBeforeContent) {
+                                window.weiboLoginNotice = true
+                                window.weiboOpening = false
+                            }
+                        })
+                    }
+                    onBack: window.goBack()
+                    onFallback: {
+                        window.weiboUseFallback = true
+                        app.openWeibo(window.selectedTitle, window.selectedUrl)
+                    }
+                } }
+            }
+            Rectangle {
+                z: 1
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom; anchors.bottomMargin: 36
+                width: weiboNoticeText.implicitWidth + 24
+                height: window.fs(30)
+                radius: 8
+                color: window.cardColor
+                border.color: window.divider
+                visible: !window.compactActive && window.weiboLoginNotice && !app.weiboLoggedIn
+                Text {
+                    id: weiboNoticeText
+                    anchors.centerIn: parent
+                    text: "登录后加载更多"
+                    color: window.foreground
+                    font.pixelSize: window.fs(12)
+                    Accessible.role: Accessible.AlertMessage
+                    Accessible.name: text
+                }
+            }
+            Loader {
+                anchors.fill: parent
+                active: window.page === "weiboDetail" && window.weiboUseFallback
                 sourceComponent: Component { Item {
                 anchors.fill: parent
                 DetailHeader { id: weiboDetailHeader; fontScale: window.fontScale; width: parent.width; title: "微博热搜"; externalUrl: window.selectedUrl; foreground: window.foreground; secondary: window.secondary; onBack: window.goBack(); onExternal: app.openExternal(externalUrl) }
+                ToolButton {
+                    text: "返回网页"
+                    anchors.right: parent.right; anchors.rightMargin: 32
+                    y: (weiboDetailHeader.height - height) / 2
+                    onClicked: { app.cancelMedia(); window.weiboUseFallback = false }
+                }
                 Text {
                     id: topicHeading
                     text: window.selectedTitle
@@ -921,7 +1198,10 @@ Window {
                 }
                 Text {
                     id: postStatus
-                    text: app.detailStatus
+                    text: window.escapePostText(app.detailStatus) + (!app.postsLoading && app.postsHasMore ? ' · <a href="newsx:more">点击重试</a>' : "")
+                    textFormat: Text.RichText
+                    linkColor: window.accent
+                    onLinkActivated: app.loadMoreWeibo()
                     visible: text.length > 0 && app.posts.length === 0
                     color: window.secondary; font.pixelSize: window.fs(12)
                     anchors.top: topicHeading.bottom; anchors.topMargin: 16
@@ -934,7 +1214,7 @@ Window {
                     WheelScroller { view: postList }
                     function maybeLoadMore() {
                         if (window.page === "weiboDetail" && app.posts.length > 0 && app.postsHasMore
-                                && !app.postsLoading && !postScrollbar.dragging
+                                && !app.postsLoading && app.detailStatus.length === 0
                                 && contentY + height >= contentHeight - 200)
                             app.loadMoreWeibo()
                     }
@@ -946,9 +1226,13 @@ Window {
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
 
-                    ScrollBarIndicator { id: postScrollbar; host: shell; view: postList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#91a9b5" : "#7e97a4"; onDraggingChanged: if (!dragging) postList.maybeLoadMore() }
-                    onContentYChanged: maybeLoadMore()
-                    onContentHeightChanged: Qt.callLater(maybeLoadMore)
+                    ScrollBarIndicator { id: postScrollbar; host: shell; view: postList; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#a0a0a0" : "#7e97a4"; onDraggingChanged: if (!dragging) postList.maybeLoadMore() }
+                    property real previousContentY: 0
+                    onContentYChanged: {
+                        const movedDown = contentY > previousContentY
+                        previousContentY = contentY
+                        if (movedDown) maybeLoadMore()
+                    }
                     Column {
                         id: postsColumn
                         width: postList.width
@@ -976,7 +1260,7 @@ Window {
                                     width: Math.round(36 * window.fontScale); height: Math.round(36 * window.fontScale)
                                     imageUrl: app.imageSources[row.avatar] || ""
                                     fallback: row.title || "微"
-                                    background: window.dark ? "#4f6977" : "#dce9ef"
+                                    background: window.dark ? "#373737" : "#dce9ef"
                                     foreground: window.foreground
                                 }
                                 Column {
@@ -1011,7 +1295,63 @@ Window {
                                     }
                                 }
                             }
-                            Image { visible: preview.length > 0; source: app.imageSources[preview] || ""; sourceSize.width: postColumn.width * window.imageScale; width: parent.width; height: visible ? Math.min(420, Math.max(180, implicitHeight * width / Math.max(1, implicitWidth))) : 0; fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false; MouseArea { anchors.fill: parent; onClicked: preview = "" } }
+                            Image {
+                                id: previewImage
+                                visible: postRow.preview.length > 0
+                                source: app.imageSources[postRow.preview] || ""
+                                sourceSize.width: postColumn.width * window.imageScale
+                                width: parent.width
+                                height: visible && status === Image.Ready ? width * implicitHeight / Math.max(1, implicitWidth) : 0
+                                fillMode: Image.PreserveAspectFit
+                                asynchronous: true
+                                cache: false
+                                readonly property var pictures: postRow.row.images || []
+                                readonly property int pictureIndex: pictures.indexOf(postRow.preview)
+                                readonly property real visibleTop: Math.max(0, postList.contentY - postRow.y - postColumn.y - y)
+                                readonly property real visibleBottom: Math.min(height, postList.contentY + postList.height - postRow.y - postColumn.y - y)
+                                MouseArea { anchors.fill: parent; onClicked: postRow.preview = "" }
+                                Repeater {
+                                    model: 2
+                                    delegate: Item {
+                                        id: imageNavigation
+                                        required property int index
+                                        readonly property int direction: index === 0 ? -1 : 1
+                                        readonly property int targetIndex: previewImage.pictureIndex + direction
+                                        width: Math.min(64, previewImage.width / 5)
+                                        height: previewImage.height
+                                        x: index === 0 ? 0 : previewImage.width - width
+                                        visible: previewImage.pictureIndex >= 0 && targetIndex >= 0 && targetIndex < previewImage.pictures.length
+                                        MouseArea {
+                                            id: navigationArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: postRow.preview = previewImage.pictures[imageNavigation.targetIndex]
+                                        }
+                                        Item {
+                                            width: parent.width
+                                            height: Math.min(48, parent.height)
+                                            y: Math.max(0, Math.min(parent.height - height, (previewImage.visibleTop + previewImage.visibleBottom - height) / 2))
+                                            visible: navigationArea.containsMouse
+                                            // Transparent controls; a shadow keeps the chevrons legible on photographs.
+                                            Text {
+                                                anchors.centerIn: parent
+                                                anchors.horizontalCenterOffset: 1
+                                                anchors.verticalCenterOffset: 1
+                                                text: imageNavigation.index === 0 ? "❮" : "❯"
+                                                color: "#99000000"
+                                                font.pixelSize: window.fs(28)
+                                            }
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: imageNavigation.index === 0 ? "❮" : "❯"
+                                                color: "white"
+                                                font.pixelSize: window.fs(28)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             Item {
                                 visible: (row.video_url || "").length > 0
                                 width: parent.width; height: visible ? Math.max(160, width * 9 / 16) : 0
@@ -1036,7 +1376,7 @@ Window {
                                 }
                                 Rectangle {
                                     width: parent.width / 3; height: parent.height; radius: 6
-                                    color: commentArea.containsMouse ? (window.dark ? "#425c69" : "#e5eff4") : "transparent"
+                                    color: commentArea.containsMouse ? (window.dark ? "#2a2a2a" : "#e5eff4") : "transparent"
                                     Row {
                                         anchors.centerIn: parent; spacing: 5
                                         Text { text: "\ue8f2"; font.family: "Segoe MDL2 Assets"; font.pixelSize: window.fs(13); color: postRow.commentsOpen ? window.accent : window.secondary }
@@ -1068,7 +1408,7 @@ Window {
                                             width: Math.round(26 * window.fontScale); height: Math.round(26 * window.fontScale)
                                             imageUrl: app.imageSources[modelData.avatar] || ""
                                             fallback: modelData.author || "微"
-                                            background: window.dark ? "#4f6977" : "#dce9ef"
+                                            background: window.dark ? "#373737" : "#dce9ef"
                                             foreground: window.foreground
                                         }
                                         Column {
@@ -1096,20 +1436,21 @@ Window {
                     }
                         }
                         Text {
-                            visible: app.posts.length > 0 && (app.postsLoading || app.detailStatus.length > 0)
+                            visible: app.posts.length > 0 && (app.postsLoading || app.postsHasMore || app.detailStatus.length > 0)
                             text: app.postsLoading ? "正在加载更多微博…"
                                 : window.escapePostText(app.detailStatus)
-                                  + (app.posts.length > 0 && !app.postsHasMore
-                                    ? ' · <a href="' + window.selectedUrl + '">官网查看更多 ↗</a>' : "")
+                                  + (app.postsHasMore
+                                    ? '<a href="newsx:more">' + (app.detailStatus.length > 0 ? ' · 点击重试' : '加载更多微博') + '</a>'
+                                    : ' · <a href="' + window.selectedUrl + '">官网查看更多 ↗</a>')
                             textFormat: Text.RichText
                             linkColor: window.accent
-                            onLinkActivated: link => app.openExternal(link)
+                            onLinkActivated: link => { if (link === "newsx:more") app.loadMoreWeibo(); else app.openExternal(link) }
                             color: window.secondary; font.pixelSize: window.fs(11)
                             width: parent.width; leftPadding: 4; topPadding: 10; bottomPadding: 12
                         }
                     }
                 }
-                Connections { target: app; function onPostsLoadingChanged() { if (!app.postsLoading) postList.maybeLoadMore() } }
+
             } }
             }
 
@@ -1124,7 +1465,7 @@ Window {
                     //拖动不滚动页面，只允许滚轮与滚动条
                     interactive: false
                     WheelScroller { view: articleView }
-                    ScrollBarIndicator { host: shell; view: articleView; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#91a9b5" : "#7e97a4" }
+                    ScrollBarIndicator { host: shell; view: articleView; offsetY: content.y; hovered: shellHover.hovered; ink: window.dark ? "#a0a0a0" : "#7e97a4" }
                     anchors.top: articleHeader.bottom; anchors.bottom: parent.bottom; width: parent.width
                     contentHeight: articleColumn.implicitHeight; clip: true
                     Column {
@@ -1158,7 +1499,7 @@ Window {
                             visible: app.articleBrief.length > 0
                             width: parent.width; height: briefLabel.implicitHeight + 18
                             radius: 10
-                            color: window.dark ? "#20313c" : "#e8f1f7"
+                            color: window.dark ? "#111111" : "#e8f1f7"
                             Rectangle {
                                 width: 3; height: parent.height - 18; radius: 1.5
                                 x: 10; anchors.verticalCenter: parent.verticalCenter
@@ -1225,15 +1566,16 @@ Window {
                 x: modelData.x; y: modelData.y; width: modelData.w; height: modelData.h
                 cursorShape: (modelData.edge === Qt.LeftEdge || modelData.edge === Qt.RightEdge) ? Qt.SizeHorCursor :
                              (modelData.edge === Qt.TopEdge || modelData.edge === Qt.BottomEdge) ? Qt.SizeVerCursor : Qt.SizeFDiagCursor
+                enabled: !edgeHide.hidden && !edgeHide.animating
                 onPressed: window.startSystemResize(modelData.edge)
             }
         }
         Rectangle {
             anchors.fill: parent
             z: 20
-            visible: window.stockPopup.length > 0 || window.frequencyOpen
-            color: window.dark ? "#750b141a" : "#66000000"
-            MouseArea { anchors.fill: parent; onClicked: { window.stockPopup = ""; window.stockPopupError = ""; window.frequencyOpen = false; window.frequencyError = "" } }
+            visible: window.stockPopup.length > 0 || window.frequencyOpen || window.weiboAccountOpen
+            color: window.dark ? "#75000000" : "#66000000"
+            MouseArea { anchors.fill: parent; onClicked: { window.stockPopup = ""; window.stockPopupError = ""; window.frequencyOpen = false; window.frequencyError = ""; window.weiboAccountOpen = false } }
         }
         Rectangle {
             id: stockPopupPanel
@@ -1241,7 +1583,7 @@ Window {
             visible: window.stockPopup.length > 0
             x: 14; y: shell.height - height - 52
             width: shell.width - 28; height: Math.round(133 * window.fontScale); radius: 17
-            color: window.dark ? "#344854" : "#f9fbfc"
+            color: window.dark ? "#171717" : "#f9fbfc"
             border.color: window.divider
             Text {
                 text: window.stockPopup === "add" ? "添加自选" : "行情站点"
@@ -1251,7 +1593,7 @@ Window {
             Rectangle {
                 width: Math.round(28 * window.fontScale); height: Math.round(28 * window.fontScale); radius: 8
                 x: parent.width - width - 6; y: 6
-                color: popupCloseArea.containsMouse ? (window.dark ? "#4d6778" : "#dceaf4") : "transparent"
+                color: popupCloseArea.containsMouse ? (window.dark ? "#303030" : "#dceaf4") : "transparent"
                 Text { anchors.centerIn: parent; text: "\ue8bb"; color: window.secondary; font.family: "Segoe MDL2 Assets"; font.pixelSize: window.fs(17) }
                 MouseArea { id: popupCloseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.stockPopup = "" }
             }
@@ -1264,8 +1606,8 @@ Window {
                         required property var modelData
                         width: Math.round(34 * window.fontScale); height: Math.round(34 * window.fontScale); radius: 9
                         color: window.selectedExchange === modelData.code
-                            ? (window.dark ? "#4a6879" : "#ffffff")
-                            : (exchangeArea.containsMouse ? (window.dark ? "#3e5867" : "#dceaf4") : "transparent")
+                            ? (window.dark ? "#303030" : "#ffffff")
+                            : (exchangeArea.containsMouse ? (window.dark ? "#2a2a2a" : "#dceaf4") : "transparent")
                         Text { anchors.centerIn: parent; text: modelData.label; color: window.foreground; font.pixelSize: window.fs(13); font.weight: window.selectedExchange === modelData.code ? Font.DemiBold : Font.Normal }
                         MouseArea { id: exchangeArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.selectedExchange = modelData.code }
                     }
@@ -1279,7 +1621,7 @@ Window {
                 inputMethodHints: Qt.ImhDigitsOnly
                 color: window.foreground; placeholderTextColor: window.secondary
                 font.pixelSize: window.fs(13)
-                background: Rectangle { radius: 8; color: window.dark ? "#20313c" : "#ffffff"; border.color: window.divider }
+                background: Rectangle { radius: 8; color: window.dark ? "#111111" : "#ffffff"; border.color: window.divider }
                 onAccepted: window.saveStockPopup()
             }
             TextField {
@@ -1289,7 +1631,7 @@ Window {
                 placeholderText: "tcp://主机:端口"
                 color: window.foreground; placeholderTextColor: window.secondary
                 font.pixelSize: window.fs(13)
-                background: Rectangle { radius: 8; color: window.dark ? "#20313c" : "#ffffff"; border.color: window.divider }
+                background: Rectangle { radius: 8; color: window.dark ? "#111111" : "#ffffff"; border.color: window.divider }
                 onAccepted: window.saveStockPopup()
             }
             Text {
@@ -1304,8 +1646,101 @@ Window {
                 x: parent.width - width - 12; y: parent.height - height - 10
                 width: Math.round(66 * window.fontScale); height: Math.round(27 * window.fontScale); radius: 10
                 color: saveArea.containsMouse ? (window.dark ? "#b9e1f6" : "#2c70a9") : window.accent
-                Text { anchors.centerIn: parent; text: window.stockPopup === "add" ? "添加" : "保存"; color: window.dark ? "#17242d" : "#ffffff"; font.pixelSize: window.fs(12); font.weight: Font.DemiBold }
+                Text { anchors.centerIn: parent; text: window.stockPopup === "add" ? "添加" : "保存"; color: window.dark ? "#000000" : "#ffffff"; font.pixelSize: window.fs(12); font.weight: Font.DemiBold }
                 MouseArea { id: saveArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.saveStockPopup() }
+            }
+        }
+        Rectangle {
+            id: weiboAccountPanel
+            z: 21
+            visible: window.weiboAccountOpen
+            x: 14
+            y: shell.height - height - 52
+            width: shell.width - 28
+            height: app.weiboLoggedIn ? window.fs(133) : Math.min(window.fs(520), shell.height - 120)
+            radius: 17
+            color: window.dark && !app.weiboLoggedIn ? "#141414" : window.cardColor
+            border.color: window.divider
+            MouseArea { anchors.fill: parent }
+            Text {
+                x: 12; y: 12
+                text: app.weiboLoggedIn ? "微博账号" : "登录微博"
+                color: window.foreground
+                font.pixelSize: window.fs(14)
+                font.weight: Font.DemiBold
+            }
+            ToolButton {
+                visible: !app.weiboLoggedIn
+                anchors.top: parent.top; anchors.topMargin: 6
+                anchors.right: parent.right; anchors.rightMargin: 8
+                width: window.fs(30); height: window.fs(30)
+                text: "×"
+                font.pixelSize: window.fs(17)
+                palette.buttonText: window.secondary
+                focusPolicy: Qt.StrongFocus
+                Accessible.name: "关闭微博登录"
+                onClicked: window.weiboAccountOpen = false
+                background: Rectangle {
+                    radius: 8
+                    color: parent.hovered ? (window.dark ? "#171717" : "#e5eff4") : "transparent"
+                    border.color: window.accent
+                    border.width: parent.activeFocus ? 1 : 0
+                }
+            }
+            Text {
+                visible: app.weiboLoggedIn
+                x: 12; y: window.fs(47)
+                width: parent.width - 24
+                text: app.weiboUserName || "微博账号"
+                elide: Text.ElideRight
+                color: window.foreground
+                font.pixelSize: window.fs(14)
+            }
+            Rectangle {
+                visible: app.weiboLoggedIn
+                width: window.fs(66); height: window.fs(30)
+                anchors.right: parent.right; anchors.rightMargin: 12
+                anchors.bottom: parent.bottom; anchors.bottomMargin: 12
+                radius: 8
+                color: logoutArea.containsMouse ? (window.dark ? "#343434" : "#b7d2e5") : (window.dark ? "#262626" : "#dceaf4")
+                Text { anchors.centerIn: parent; text: "登出"; color: window.foreground; font.pixelSize: window.fs(12) }
+                MouseArea {
+                    id: logoutArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { window.weiboAccountOpen = false; app.logoutWeibo() }
+                }
+                Accessible.role: Accessible.Button
+                Accessible.name: "登出微博"
+                Accessible.onPressAction: { window.weiboAccountOpen = false; app.logoutWeibo() }
+            }
+            Loader {
+                anchors.fill: parent
+                anchors.margins: 12
+                anchors.topMargin: window.fs(40)
+                active: window.weiboAccountOpen && !app.weiboLoggedIn
+                sourceComponent: Component { Item {
+                    Text {
+                        anchors.centerIn: parent
+                        width: parent.width - 20
+                        text: accountBrowser.errorString || (accountBrowser.loading ? "正在加载登录页…" : "正在确认登录状态…")
+                        color: window.secondary
+                        font.pixelSize: window.fs(12)
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                    }
+                    WeiboWebView {
+                        id: accountBrowser
+                        anchors.fill: parent
+                        url: "https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog&url=https%3A%2F%2Fm.weibo.cn%2F"
+                        session: app.weiboSession
+                        loginOnly: true
+                        darkTheme: window.dark
+                        backgroundColor: weiboAccountPanel.color
+                        onCloseRequested: window.weiboAccountOpen = false
+                    }
+                } }
             }
         }
         Rectangle {
@@ -1314,7 +1749,7 @@ Window {
             visible: window.frequencyOpen
             x: 14; y: shell.height - height - 52
             width: shell.width - 28; height: Math.round(133 * window.fontScale); radius: 17
-            color: window.dark ? "#344854" : "#f9fbfc"
+            color: window.dark ? "#171717" : "#f9fbfc"
             border.color: window.divider
             Text {
                 text: window.page === "weibo" ? "微博刷新频率" : "财联社刷新频率"
@@ -1324,7 +1759,7 @@ Window {
             Rectangle {
                 width: Math.round(28 * window.fontScale); height: Math.round(28 * window.fontScale); radius: 8
                 x: parent.width - width - 6; y: 6
-                color: frequencyCloseArea.containsMouse ? (window.dark ? "#4d6778" : "#dceaf4") : "transparent"
+                color: frequencyCloseArea.containsMouse ? (window.dark ? "#303030" : "#dceaf4") : "transparent"
                 Text { anchors.centerIn: parent; text: "\ue8bb"; color: window.secondary; font.family: "Segoe MDL2 Assets"; font.pixelSize: window.fs(17) }
                 MouseArea { id: frequencyCloseArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.frequencyOpen = false }
             }
@@ -1335,7 +1770,7 @@ Window {
                 inputMethodHints: Qt.ImhDigitsOnly
                 color: window.foreground; placeholderTextColor: window.secondary
                 font.pixelSize: window.fs(13)
-                background: Rectangle { radius: 8; color: window.dark ? "#20313c" : "#ffffff"; border.color: window.divider }
+                background: Rectangle { radius: 8; color: window.dark ? "#111111" : "#ffffff"; border.color: window.divider }
                 onAccepted: window.saveFrequency()
             }
             Text {
@@ -1355,7 +1790,7 @@ Window {
                 x: parent.width - width - 12; y: parent.height - height - 10
                 width: Math.round(66 * window.fontScale); height: Math.round(27 * window.fontScale); radius: 10
                 color: frequencySaveArea.containsMouse ? (window.dark ? "#b9e1f6" : "#2c70a9") : window.accent
-                Text { anchors.centerIn: parent; text: "保存"; color: window.dark ? "#17242d" : "#ffffff"; font.pixelSize: window.fs(12); font.weight: Font.DemiBold }
+                Text { anchors.centerIn: parent; text: "保存"; color: window.dark ? "#000000" : "#ffffff"; font.pixelSize: window.fs(12); font.weight: Font.DemiBold }
                 MouseArea { id: frequencySaveArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.saveFrequency() }
             }
         }

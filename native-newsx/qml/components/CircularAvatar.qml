@@ -4,8 +4,8 @@ Item {
     id: root
     property string imageUrl: ""
     property string fallback: "微"
-    property color background: "#4f6977"
-    property color foreground: "#f4f7f9"
+    property color background: "#373737"
+    property color foreground: "#f2f2f2"
     readonly property bool hasImage: imageUrl.length > 0
     readonly property bool imageReady: image.status === Image.Ready
     width: 36

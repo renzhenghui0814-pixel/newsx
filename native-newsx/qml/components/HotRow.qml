@@ -3,11 +3,11 @@ import QtQuick
 Item {
     id: root
     property var row: ({})
-    property color foreground: "#f4f7f9"
-    property color secondary: "#a5b9c4"
+    property color foreground: "#f2f2f2"
+    property color secondary: "#bdbdbd"
     property bool darkMode: true
     property bool detailed: false
-    property color divider: darkMode ? "#4c616d" : "#d8e2e8"
+    property color divider: darkMode ? "#373737" : "#d8e2e8"
     property int rank: Number(row.rank || 0)
     property bool featured: rank >= 1 && rank <= 3
     property color tone: rank === 1 ? (darkMode ? "#ff6b78" : "#c52b3b")
@@ -71,7 +71,7 @@ Item {
         visible: String(root.row.tag || "").trim().length > 0
         color: root.rank === 1 ? (root.darkMode ? "#59373f" : "#fbe5e8")
                 : root.featured ? (root.darkMode ? "#59483f" : "#f7e3d7")
-                : (root.darkMode ? "#3b5360" : "#e7edf1")
+                : (root.darkMode ? "#2a2a2a" : "#e7edf1")
         Text {
             anchors.fill: parent
             text: String(root.row.tag || "").trim()

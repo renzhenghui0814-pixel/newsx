@@ -6,9 +6,9 @@ Rectangle {
     property string title: ""
     property string timestamp: ""
     property string origin: ""
-    property color surface: "#23323e"
-    property color foreground: "#f2f6f8"
-    property color secondary: "#9eb2be"
+    property color surface: "#171717"
+    property color foreground: "#f2f2f2"
+    property color secondary: "#bdbdbd"
     property var rows: []
     property Component rowDelegate
     property Component columnHeader

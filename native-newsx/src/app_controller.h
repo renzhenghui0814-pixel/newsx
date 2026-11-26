@@ -10,19 +10,28 @@
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
+#include <QWindow>
 #include <cstdint>
 #include <map>
+#include <memory>
+class QWindow;
 
 namespace newsx {
+class WeiboLoginDialog;
 
 class AppController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString theme READ theme NOTIFY themeChanged)
+    Q_PROPERTY(bool weiboLoggedIn READ weibo_logged_in NOTIFY weiboSessionChanged)
+    Q_PROPERTY(QObject* weiboSession READ weibo_session CONSTANT)
+    Q_PROPERTY(QString weiboUserName READ weibo_user_name NOTIFY weiboUserNameChanged)
+    Q_PROPERTY(QString weiboLoginStatus READ weibo_login_status NOTIFY weiboLoginStatusChanged)
     Q_PROPERTY(double opacity READ opacity NOTIFY opacityChanged)
     Q_PROPERTY(bool alwaysOnTop READ always_on_top NOTIFY alwaysOnTopChanged)
     Q_PROPERTY(int hotRefreshMinutes READ hot_refresh_minutes NOTIFY hotRefreshMinutesChanged)
     Q_PROPERTY(int headlineRefreshMinutes READ headline_refresh_minutes NOTIFY headlineRefreshMinutesChanged)
     Q_PROPERTY(bool minimalMode READ minimal_mode NOTIFY minimalModeChanged)
+    Q_PROPERTY(QString windowMode READ window_mode NOTIFY windowModeChanged)
     Q_PROPERTY(QString minimalCard READ minimal_card NOTIFY minimalCardChanged)
     Q_PROPERTY(int initialX READ initial_x CONSTANT)
     Q_PROPERTY(int initialY READ initial_y CONSTANT)
@@ -58,6 +67,12 @@ class AppController final : public QObject {
 public:
     explicit AppController(QObject* parent = nullptr);
     ~AppController() override;
+    bool weibo_logged_in() const;
+    QObject* weibo_session() const;
+    QString weibo_user_name() const;
+    Q_INVOKABLE void logoutWeibo();
+    QString weibo_login_status() const;
+    Q_INVOKABLE void openWeiboLogin(QWindow* owner);
 
     [[nodiscard]] QString theme() const { return settings_.theme; }
     [[nodiscard]] double opacity() const { return settings_.opacity; }
@@ -65,6 +80,8 @@ public:
     [[nodiscard]] int hot_refresh_minutes() const { return settings_.hot_refresh_minutes; }
     [[nodiscard]] int headline_refresh_minutes() const { return settings_.headline_refresh_minutes; }
     [[nodiscard]] bool minimal_mode() const { return settings_.minimal_mode; }
+    [[nodiscard]] QString window_mode() const { return settings_.window_mode; }
+    Q_INVOKABLE void setWindowMode(const QString& value);
     [[nodiscard]] QString minimal_card() const { return settings_.minimal_card; }
     [[nodiscard]] int initial_x() const { return settings_.x; }
     [[nodiscard]] int initial_y() const { return settings_.y; }
@@ -125,12 +142,16 @@ public:
     Q_INVOKABLE QVariantMap stock(const QString& symbol) const;
 
 signals:
+    void weiboSessionChanged();
+    void weiboUserNameChanged();
+    void weiboLoginStatusChanged();
     void themeChanged();
     void opacityChanged();
     void alwaysOnTopChanged();
     void hotRefreshMinutesChanged();
     void headlineRefreshMinutesChanged();
     void minimalModeChanged();
+    void windowModeChanged();
     void minimalCardChanged();
     void stocksChanged();
     void hotItemsChanged();
@@ -170,6 +191,7 @@ private:
     Settings settings_;
     CacheStore cache_;
     NewsService news_;
+    std::unique_ptr<WeiboLoginDialog> weibo_login_dialog_;
     MediaService media_;
     market::ToraFeed feed_;
     QTimer market_timer_;
@@ -178,12 +200,15 @@ private:
     QVariantList stocks_;
     QVariantList hot_items_;
     QVariantList headlines_;
+    void append_post_batch();
+    QVariantList pending_posts_;
+    bool post_source_has_more_ = true;
+    QString post_completion_status_;
     QVariantList posts_;
     QVariantMap comment_threads_;
     QString post_keyword_;
     QString post_search_url_;
     int post_page_ = 0;
-    int post_count_before_page_ = 0;
     bool posts_loading_ = false;
     bool posts_has_more_ = false;
     QString article_title_;

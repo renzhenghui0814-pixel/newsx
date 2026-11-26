@@ -9,8 +9,8 @@ Item {
     property string rightActionIcon: ""
     property string rightActionHint: ""
     property bool showDivider: true
-    property color foreground: "#f4f7f9"
-    property color secondary: "#a5b9c4"
+    property color foreground: "#f2f2f2"
+    property color secondary: "#bdbdbd"
     // Font multiplier: Main.qml passes window.fontScale in.
     property real fontScale: 1.15
     function fs(size) { return Math.round(size * fontScale) }
@@ -74,8 +74,15 @@ Item {
     Rectangle {
         id: rightActionButton
         visible: root.rightActionIcon.length > 0
+        activeFocusOnTab: visible
+        Accessible.role: Accessible.Button
+        Accessible.name: root.rightActionHint
+        Accessible.onPressAction: root.rightAction()
+        Keys.onReturnPressed: root.rightAction()
+        Keys.onSpacePressed: root.rightAction()
         width: 30; height: 30; radius: 8
-        anchors.right: parent.right
+        anchors.right: externalButton.visible ? externalButton.left : parent.right
+        anchors.rightMargin: externalButton.visible ? 8 : 0
         anchors.verticalCenter: parent.verticalCenter
         color: rightActionArea.containsMouse ? Qt.rgba(0.55, 0.75, 0.9, 0.18) : "transparent"
         Text {

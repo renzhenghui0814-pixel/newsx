@@ -16,6 +16,7 @@ struct Settings {
     double opacity = 0.86;
     bool always_on_top = true;
     bool minimal_mode = false;
+    QString window_mode = QStringLiteral("normal");
     QString minimal_card = QStringLiteral("stocks");
     int x = -1;
     int y = -1;

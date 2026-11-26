@@ -15,7 +15,7 @@ namespace newsx {
 
 QString app_data_dir() {
 #ifdef Q_OS_WIN
-    // The Python app stores both config.json and cache.json under %APPDATA%.
+    // Store configuration and cache together in the roaming application folder.
     // Qt's GenericConfigLocation resolves to LocalAppData on Windows.
     const auto appdata = qEnvironmentVariable("APPDATA");
     if (!appdata.isEmpty()) return QDir(appdata).filePath(QStringLiteral("NewsXWidget"));
@@ -34,6 +34,10 @@ Settings load_settings() {
     settings.opacity = std::clamp(object.value(QStringLiteral("opacity")).toDouble(0.86), 0.45, 1.0);
     settings.always_on_top = object.value(QStringLiteral("always_on_top")).toBool(true);
     settings.minimal_mode = object.value(QStringLiteral("minimal_mode")).toBool(false);
+    const auto window_mode = object.value(QStringLiteral("window_mode")).toString();
+    settings.window_mode = window_mode == QStringLiteral("normal") || window_mode == QStringLiteral("minimal") || window_mode == QStringLiteral("hidden")
+        ? window_mode : settings.minimal_mode ? QStringLiteral("minimal") : QStringLiteral("normal");
+    settings.minimal_mode = settings.window_mode == QStringLiteral("minimal");
     const auto minimal_card = object.value(QStringLiteral("minimal_card")).toString();
     if (minimal_card == QStringLiteral("stocks") || minimal_card == QStringLiteral("weibo") ||
         minimal_card == QStringLiteral("cls")) settings.minimal_card = minimal_card;
@@ -81,6 +85,7 @@ bool save_settings(const Settings& settings) {
     object.insert(QStringLiteral("opacity"), settings.opacity);
     object.insert(QStringLiteral("always_on_top"), settings.always_on_top);
     object.insert(QStringLiteral("minimal_mode"), settings.minimal_mode);
+    object.insert(QStringLiteral("window_mode"), settings.window_mode);
     object.insert(QStringLiteral("minimal_card"), settings.minimal_card);
     object.insert(QStringLiteral("x"), settings.x);
     object.insert(QStringLiteral("y"), settings.y);

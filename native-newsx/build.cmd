@@ -18,6 +18,6 @@ if errorlevel 1 exit /b 1
 
 cmake -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%" -DNEWSX_RUNTIME_OUTPUT_DIR="%BUILD_DIR%\app"
 if errorlevel 1 exit /b 1
-cmake --build "%BUILD_DIR%" --target NewsXNative --parallel 4
+cmake --build "%BUILD_DIR%" --target NewsXNative --clean-first --parallel 4
 if errorlevel 1 exit /b 1
 echo Built "%BUILD_DIR%\app\NewsXNative.exe"

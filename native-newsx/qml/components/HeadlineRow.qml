@@ -3,11 +3,11 @@ import QtQuick
 Item {
     id: root
     property var row: ({})
-    property color foreground: "#f4f7f9"
-    property color secondary: "#a5b9c4"
+    property color foreground: "#f2f2f2"
+    property color secondary: "#bdbdbd"
     property bool darkMode: true
     property bool detailed: false
-    property color divider: darkMode ? "#4c616d" : "#d8e2e8"
+    property color divider: darkMode ? "#373737" : "#d8e2e8"
     signal opened(string url, string title)
     width: parent ? parent.width : 300
     height: Math.round((detailed ? 49 : 34) * fontScale)
